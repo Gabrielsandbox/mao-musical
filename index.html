@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Mão Musical</title>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #0a0e17;
+      color: #e0e6f0;
+      overflow: hidden;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 16px 20px;
+      background: rgba(10, 14, 23, 0.9);
+      backdrop-filter: blur(10px);
+      border-bottom: 1px solid #1a2332;
+      text-align: center;
+      z-index: 10;
+    }
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      background: linear-gradient(90deg, #00d4ff, #7b61ff);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .status {
+      margin-top: 6px;
+      font-size: 0.95rem;
+      color: #8b9bb4;
+    }
+    .status.detected { color: #00ff9d; font-weight: 600; }
+    #container {
+      flex: 1;
+      position: relative;
+      background: #000;
+    }
+    #output_canvas {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+    #startBtn {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      padding: 16px 32px;
+      font-size: 1.1rem;
+      background: linear-gradient(135deg, #00d4ff, #7b61ff);
+      color: white;
+      border: none;
+      border-radius: 50px;
+      cursor: pointer;
+      box-shadow: 0 8px 25px rgba(0, 212, 255, 0.3);
+      z-index: 20;
+      transition: transform 0.2s, box-shadow 0.2s;
+    }
+    #startBtn:hover { transform: translate(-50%, -50%) scale(1.05); }
+    #startBtn:active { transform: translate(-50%, -50%) scale(0.98); }
+    .info {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.6);
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      color: #ccc;
+      pointer-events: none;
+    }
+    .music-info {
+      position: absolute;
+      top: 70px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0, 212, 255, 0.15);
+      border: 1px solid #00d4ff;
+      padding: 10px 22px;
+      border-radius: 24px;
+      font-size: 1.05rem;
+      color: #00d4ff;
+      font-weight: 600;
+      display: none;
+      z-index: 15;
+      text-align: center;
+      max-width: 90%;
+    }
+    .legend {
+      position: absolute;
+      bottom: 55px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(0,0,0,0.55);
+      padding: 8px 14px;
+      border-radius: 16px;
+      font-size: 0.78rem;
+      color: #bbb;
+      pointer-events: none;
+      text-align: center;
+      line-height: 1.4;
+      max-width: 92%;
+    }
+    .secure-warning {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      background: #ff3b30;
+      color: white;
+      padding: 12px 16px;
+      font-size: 0.9rem;
+      text-align: center;
+      z-index: 100;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="secure-warning" id="secureWarning">
+    Câmera bloqueada: abra esta página em HTTPS (não em arquivo local). Use um servidor ou hospede o arquivo.
+  </div>
+  <header>
+    <h1>Mão Musical</h1>
+    <div class="status" id="status">Toque no botão para iniciar a câmera</div>
+  </header>
+
+  <div id="container">
+    <canvas id="output_canvas"></canvas>
+    <button id="startBtn">Abrir Câmera</button>
+    <div class="loading" id="loading">Carregando modelo...</div>
+    <div class="info">Levante um dedo para tocar a nota dele</div>
+    <div class="legend">
+      Mindinho: B4 &nbsp;•&nbsp; Anelar: G4 &nbsp;•&nbsp; Médio: E4 &nbsp;•&nbsp; Indicador: C4 &nbsp;•&nbsp; Polegar: A3
+    </div>
+    <div class="music-info" id="musicInfo">—</div>
+  </div>
+
+  <video id="input_video" style="display:none;" playsinline></video>
+
+  <script>
+    const videoElement = document.getElementById('input_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const startBtn = document.getElementById('startBtn');
+    const statusEl = document.getElementById('status');
+    const loadingEl = document.getElementById('loading');
+    const musicInfo = document.getElementById('musicInfo');
+
+    let hands = null;
+    let camera = null;
+    let isRunning = false;
+
+    // Web Audio
+    let audioCtx = null;
+    let fingerOscillators = [];
+    let fingerGains = [];
+
+    // Estado de histerese para cada dedo (evita piscadas)
+    let fingerRaised = [false, false, false, false, false];
+
+    // Cada dedo = uma nota (estilo teclado)
+    const FINGER_NOTES = [
+      { name: 'Polegar', note: 'A3', freq: 220.00, tip: 4, base: 2, color: '#ff6b9d' },
+      { name: 'Indicador', note: 'C4', freq: 261.63, tip: 8, base: 6, color: '#00d4ff' },
+      { name: 'Médio', note: 'E4', freq: 329.63, tip: 12, base: 10, color: '#7b61ff' },
+      { name: 'Anelar', note: 'G4', freq: 392.00, tip: 16, base: 14, color: '#00ff9d' },
+      { name: 'Mindinho', note: 'B4', freq: 493.88, tip: 20, base: 18, color: '#ffb347' },
+    ];
+
+    function initAudio() {
+      if (audioCtx) return;
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+      // Master gain
+      const master = audioCtx.createGain();
+      master.gain.value = 0.7;
+      master.connect(audioCtx.destination);
+
+      FINGER_NOTES.forEach((f, i) => {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle'; // som mais suave e musical que sine
+        osc.frequency.value = f.freq;
+        gain.gain.value = 0;
+        osc.connect(gain);
+        gain.connect(master);
+        osc.start();
+        fingerOscillators[i] = osc;
+        fingerGains[i] = gain;
+      });
+    }
+
+    function setFingerGain(index, target) {
+      if (!fingerGains[index] || !audioCtx) return;
+      fingerGains[index].gain.setTargetAtTime(target, audioCtx.currentTime, 0.08);
+    }
+
+    function resizeCanvas() {
+      const container = document.getElementById('container');
+      canvasElement.width = container.clientWidth;
+      canvasElement.height = container.clientHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function onResults(results) {
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      // Espelha a imagem para ficar natural (câmera frontal)
+      canvasCtx.translate(canvasElement.width, 0);
+      canvasCtx.scale(-1, 1);
+      canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+      canvasCtx.setTransform(1, 0, 0, 1, 0, 0); // reset
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        statusEl.textContent = `Mão detectada — levante os dedos`;
+        statusEl.classList.add('detected');
+
+        const landmarks = results.multiHandLandmarks[0];
+        let activeNotes = [];
+
+        FINGER_NOTES.forEach((finger, i) => {
+          const tip = landmarks[finger.tip];
+          const base = landmarks[finger.base];
+
+          // Diferença de altura (y menor = mais alto na tela)
+          const extension = base.y - tip.y;
+
+          // Histerese: thresholds diferentes para subir e descer
+          const upThreshold = 0.045;
+          const downThreshold = 0.025;
+
+          if (!fingerRaised[i] && extension > upThreshold) {
+            fingerRaised[i] = true;
+          } else if (fingerRaised[i] && extension < downThreshold) {
+            fingerRaised[i] = false;
+          }
+
+          const gain = fingerRaised[i] ? 0.22 : 0;
+          setFingerGain(i, gain);
+          if (fingerRaised[i]) activeNotes.push(finger.note);
+        });
+
+        musicInfo.style.display = 'block';
+        musicInfo.textContent = activeNotes.length > 0
+          ? `♪ ${activeNotes.join(' + ')}`
+          : 'Levante um dedo para tocar';
+
+        // Desenha a mão (já espelhada, então precisamos ajustar coordenadas)
+        for (const lm of results.multiHandLandmarks) {
+          // Desenha conexões e pontos com coordenadas espelhadas
+          const mirrored = lm.map(p => ({ x: 1 - p.x, y: p.y, z: p.z }));
+
+          drawConnectors(canvasCtx, mirrored, HAND_CONNECTIONS, {
+            color: '#00ff9d',
+            lineWidth: 5
+          });
+          drawLandmarks(canvasCtx, mirrored, {
+            color: '#00d4ff',
+            lineWidth: 2,
+            radius: 3
+          });
+
+          // Destaca pontas dos dedos com cor e nota
+          FINGER_NOTES.forEach((finger, i) => {
+            const tip = lm[finger.tip];
+            const x = (1 - tip.x) * canvasElement.width;
+            const y = tip.y * canvasElement.height;
+
+            const isActive = fingerRaised[i];
+            const radius = isActive ? 14 : 9;
+
+            canvasCtx.beginPath();
+            canvasCtx.arc(x, y, radius, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = isActive ? finger.color : 'rgba(255,0,170,0.7)';
+            canvasCtx.fill();
+            canvasCtx.strokeStyle = '#fff';
+            canvasCtx.lineWidth = isActive ? 3 : 2;
+            canvasCtx.stroke();
+
+            // Nome da nota
+            if (isActive) {
+              canvasCtx.font = 'bold 14px sans-serif';
+              canvasCtx.fillStyle = '#fff';
+              canvasCtx.textAlign = 'center';
+              canvasCtx.fillText(finger.note, x, y - 20);
+            }
+          });
+        }
+      } else {
+        statusEl.textContent = 'Nenhuma mão detectada';
+        statusEl.classList.remove('detected');
+        musicInfo.style.display = 'none';
+        fingerRaised = [false, false, false, false, false];
+        FINGER_NOTES.forEach((_, i) => setFingerGain(i, 0));
+      }
+      canvasCtx.restore();
+    }
+
+    async function startCamera() {
+      if (isRunning) return;
+
+      if (!window.isSecureContext) {
+        statusEl.textContent = 'Câmera só funciona em HTTPS ou localhost. Hospede o arquivo ou use um servidor.';
+        secureWarning.style.display = 'block';
+        return;
+      }
+
+      startBtn.style.display = 'none';
+      loadingEl.style.display = 'block';
+      statusEl.textContent = 'Solicitando permissão da câmera...';
+
+      try {
+        // Pede permissão explicitamente primeiro (melhor feedback no Android/iOS)
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false
+        });
+        videoElement.srcObject = stream;
+
+        hands = new Hands({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+
+        hands.setOptions({
+          maxNumHands: 2,
+          modelComplexity: 1,
+          minDetectionConfidence: 0.6,
+          minTrackingConfidence: 0.5
+        });
+
+        hands.onResults(onResults);
+
+        camera = new Camera(videoElement, {
+          onFrame: async () => {
+            if (hands) await hands.send({ image: videoElement });
+          },
+          width: 1280,
+          height: 720
+        });
+
+        await camera.start();
+        isRunning = true;
+        loadingEl.style.display = 'none';
+        statusEl.textContent = 'Câmera ativa — levante os dedos para tocar';
+        initAudio();
+        if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+      } catch (err) {
+        console.error(err);
+        loadingEl.style.display = 'none';
+        startBtn.style.display = 'block';
+
+        if (err.name === 'NotAllowedError') {
+          statusEl.textContent = 'Permissão da câmera negada. Libere nas configurações do navegador.';
+        } else if (err.name === 'NotFoundError') {
+          statusEl.textContent = 'Nenhuma câmera encontrada no dispositivo.';
+        } else if (err.name === 'NotReadableError') {
+          statusEl.textContent = 'Câmera em uso por outro app. Feche outros apps e tente novamente.';
+        } else {
+          statusEl.textContent = 'Erro ao acessar a câmera: ' + (err.message || err.name);
+        }
+      }
+    }
+
+    const secureWarning = document.getElementById('secureWarning');
+
+    // Avisa se não estiver em contexto seguro
+    if (!window.isSecureContext) {
+      secureWarning.style.display = 'block';
+      statusEl.textContent = 'Abra via HTTPS para usar a câmera';
+    }
+
+    startBtn.addEventListener('click', startCamera);
+  </script>
+</body>
+</html>
